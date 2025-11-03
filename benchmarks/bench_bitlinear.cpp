@@ -64,13 +64,13 @@ BenchResults benchmark_gemm(const BenchConfig& cfg) {
     
     // Warmup
     for (int i = 0; i < cfg.num_warmup; ++i) {
-        bitkernels::bitlinear_gemm(X, cfg.M, cfg.K, packed_weights, Y, cfg.eps);
+        bitkernels::bitlinear_gemm(X, cfg.M, cfg.K, packed_weights, Y, nullptr, cfg.eps);
     }
     
     // Benchmark
     auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < cfg.num_runs; ++i) {
-        bitkernels::bitlinear_gemm(X, cfg.M, cfg.K, packed_weights, Y, cfg.eps);
+        bitkernels::bitlinear_gemm(X, cfg.M, cfg.K, packed_weights, Y, nullptr, cfg.eps);
     }
     auto end = std::chrono::high_resolution_clock::now();
     
@@ -117,13 +117,13 @@ BenchResults benchmark_gemv(const BenchConfig& cfg) {
     
     // Warmup
     for (int i = 0; i < cfg.num_warmup; ++i) {
-        bitkernels::bitlinear_gemv(X, cfg.K, packed_weights, Y, cfg.eps);
+        bitkernels::bitlinear_gemv(X, cfg.K, packed_weights, Y, nullptr, cfg.eps);
     }
     
     // Benchmark
     auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < cfg.num_runs; ++i) {
-        bitkernels::bitlinear_gemv(X, cfg.K, packed_weights, Y, cfg.eps);
+        bitkernels::bitlinear_gemv(X, cfg.K, packed_weights, Y, nullptr, cfg.eps);
     }
     auto end = std::chrono::high_resolution_clock::now();
     

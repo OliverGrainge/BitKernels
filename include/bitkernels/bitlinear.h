@@ -42,7 +42,7 @@ void prepare_weights(
 );
 
 /**
- * Forward pass: Y = X @ W^T where W is ternary and X is dynamically quantized to INT8
+ * Forward pass: Y = X @ W^T + bias where W is ternary and X is dynamically quantized to INT8
  * 
  * This function automatically dispatches to the optimal kernel based on:
  * - Hardware architecture (ARM NEON, x86 AVX, etc.)
@@ -55,16 +55,19 @@ void prepare_weights(
  *    - Quantize to INT8: X_q[m,k] = round(X[m,k] / scale_x[m])
  * 2. Perform integer matmul: Y_int32[m,n] = sum_k(X_q[m,k] * W_ternary[n,k])
  * 3. Dequantize: Y[m,n] = Y_int32[m,n] * scale_x[m] * scale_w
+ * 4. Add bias (if provided): Y[m,n] += bias[n]
  * 
  * @param X_fp32        Input activations X[M×K] in row-major format (FP32)
  * @param M             Batch size / number of input rows
  * @param K             Number of input features (must match weights)
  * @param packed_weights Prepared packed ternary weights W[N×K]
  * @param Y_fp32        Output activations Y[M×N] in row-major format (FP32)
+ * @param bias          Optional bias vector [N] (FP32), nullptr if no bias
  * @param eps           Epsilon for numerical stability (default: 1e-6)
  * 
  * @note K must match packed_weights.K
  * @note Y_fp32 must be pre-allocated with size M × N
+ * @note If bias is provided, it must have size N
  */
 void bitlinear_forward(
     const float* X_fp32,
@@ -72,6 +75,7 @@ void bitlinear_forward(
     size_t K,
     const PackedWeights& packed_weights,
     float* Y_fp32,
+    const float* bias = nullptr,
     float eps = 1e-6f
 );
 
@@ -87,6 +91,7 @@ void bitlinear_gemm(
     size_t K,
     const PackedWeights& packed_weights,
     float* Y_fp32,
+    const float* bias = nullptr,
     float eps = 1e-6f
 );
 
@@ -99,6 +104,7 @@ void bitlinear_gemv(
     size_t K,
     const PackedWeights& packed_weights,
     float* Y_fp32,
+    const float* bias = nullptr,
     float eps = 1e-6f
 );
 

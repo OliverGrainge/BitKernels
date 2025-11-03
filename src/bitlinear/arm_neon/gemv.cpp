@@ -341,6 +341,7 @@ void bitlinear_gemv_impl(
     size_t K,
     const PackedWeights& packed_weights,
     float* Y_fp32,
+    const float* bias,
     float eps
 ) {
     if (K != packed_weights.K) {
@@ -368,6 +369,23 @@ void bitlinear_gemv_impl(
     #endif
     
     delete[] x_int8;
+    
+    // Add bias if provided
+    if (bias != nullptr) {
+        size_t n = 0;
+        // Vectorized bias addition
+        for (; n + 4 <= N; n += 4) {
+            float32x4_t y_vec = vld1q_f32(Y_fp32 + n);
+            float32x4_t b_vec = vld1q_f32(bias + n);
+            y_vec = vaddq_f32(y_vec, b_vec);
+            vst1q_f32(Y_fp32 + n, y_vec);
+        }
+        
+        // Handle remainder
+        for (; n < N; ++n) {
+            Y_fp32[n] += bias[n];
+        }
+    }
 }
 
 }  // namespace arm_neon

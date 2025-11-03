@@ -7,9 +7,11 @@ namespace bitkernels {
 // Forward declarations of architecture-specific implementations
 namespace arm_neon {
     void bitlinear_gemm_impl(const float* X, size_t M, size_t K, 
-                            const PackedWeights& W, float* Y, float eps);
+                            const PackedWeights& W, float* Y, 
+                            const float* bias, float eps);
     void bitlinear_gemv_impl(const float* X, size_t K,
-                            const PackedWeights& W, float* Y, float eps);
+                            const PackedWeights& W, float* Y, 
+                            const float* bias, float eps);
 }
 
 // Threshold for choosing between GEMV and GEMM
@@ -25,6 +27,7 @@ void bitlinear_forward(
     size_t K,
     const PackedWeights& packed_weights,
     float* Y_fp32,
+    const float* bias,
     float eps
 ) {
     // Dispatch based on batch size
@@ -34,7 +37,7 @@ void bitlinear_forward(
             #ifdef __ARM_NEON
                 arm_neon::bitlinear_gemv_impl(
                     X_fp32 + m * K, K, packed_weights,
-                    Y_fp32 + m * packed_weights.N, eps
+                    Y_fp32 + m * packed_weights.N, bias, eps
                 );
             #else
                 std::cerr << "ERROR: No implementation available for this architecture" << std::endl;
@@ -44,7 +47,7 @@ void bitlinear_forward(
     } else {
         // For larger M, use tiled GEMM
         #ifdef __ARM_NEON
-            arm_neon::bitlinear_gemm_impl(X_fp32, M, K, packed_weights, Y_fp32, eps);
+            arm_neon::bitlinear_gemm_impl(X_fp32, M, K, packed_weights, Y_fp32, bias, eps);
         #else
             std::cerr << "ERROR: No implementation available for this architecture" << std::endl;
             return;
@@ -62,10 +65,11 @@ void bitlinear_gemm(
     size_t K,
     const PackedWeights& packed_weights,
     float* Y_fp32,
+    const float* bias,
     float eps
 ) {
     #ifdef __ARM_NEON
-        arm_neon::bitlinear_gemm_impl(X_fp32, M, K, packed_weights, Y_fp32, eps);
+        arm_neon::bitlinear_gemm_impl(X_fp32, M, K, packed_weights, Y_fp32, bias, eps);
     #else
         std::cerr << "ERROR: No ARM NEON implementation available" << std::endl;
     #endif
@@ -80,10 +84,11 @@ void bitlinear_gemv(
     size_t K,
     const PackedWeights& packed_weights,
     float* Y_fp32,
+    const float* bias,
     float eps
 ) {
     #ifdef __ARM_NEON
-        arm_neon::bitlinear_gemv_impl(X_fp32, K, packed_weights, Y_fp32, eps);
+        arm_neon::bitlinear_gemv_impl(X_fp32, K, packed_weights, Y_fp32, bias, eps);
     #else
         std::cerr << "ERROR: No ARM NEON implementation available" << std::endl;
     #endif

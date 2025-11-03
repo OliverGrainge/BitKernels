@@ -387,6 +387,7 @@ void bitlinear_gemm_impl(
     size_t K,
     const PackedWeights& packed_weights,
     float* Y_fp32,
+    const float* bias,
     float eps
 ) {
     if (K != packed_weights.K) {
@@ -473,6 +474,28 @@ void bitlinear_gemm_impl(
         free(x_tile);
         free(w_tile);
         free(scales_x);
+    }
+    
+    // Add bias if provided
+    if (bias != nullptr) {
+        #pragma omp parallel for
+        for (size_t m = 0; m < M; ++m) {
+            float* y_row = Y_fp32 + m * N;
+            
+            // Vectorized bias addition
+            size_t n = 0;
+            for (; n + 4 <= N; n += 4) {
+                float32x4_t y_vec = vld1q_f32(y_row + n);
+                float32x4_t b_vec = vld1q_f32(bias + n);
+                y_vec = vaddq_f32(y_vec, b_vec);
+                vst1q_f32(y_row + n, y_vec);
+            }
+            
+            // Handle remainder
+            for (; n < N; ++n) {
+                y_row[n] += bias[n];
+            }
+        }
     }
 }
 

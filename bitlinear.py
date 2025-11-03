@@ -4,6 +4,18 @@ import numpy as np
 from typing import Optional
 
 def bitlinear(x: torch.Tensor, w: torch.Tensor, bias: Optional[torch.Tensor] = None, eps: float = 1e-6) -> torch.Tensor:
+    """
+    BitLinear forward pass with ternary weights and INT8 activations.
+    
+    Args:
+        x: Input tensor [M × K]
+        w: Weight tensor [N × K]
+        bias: Optional bias tensor [N]
+        eps: Epsilon for numerical stability
+        
+    Returns:
+        Output tensor [M × N]
+    """
     # Per-channel (per-row) activation quantization
     sx = x.abs().max(dim=-1, keepdim=True).values / 127.0
     sx = sx.clamp(min=eps)
@@ -50,26 +62,33 @@ def main():
     
     X = torch.randn(M, K)  # Activations
     W = torch.randn(N, K)  # Weights
+    bias = torch.randn(N)  # Bias
     
-    print("\n[1/4] Generating test data...")
+    print("\n[1/5] Generating test data...")
     print(f"  X (activations): {X.shape}")
     print(f"  W (weights):     {W.shape}")
+    print(f"  bias:            {bias.shape}")
     
     # Save inputs for C++
-    print("\n[2/4] Saving inputs to binary files...")
+    print("\n[2/5] Saving inputs to binary files...")
     save_matrix('test_X.bin', X)
     save_matrix('test_W.bin', W)
+    save_matrix('test_bias.bin', bias)
     
-    # Compute Python result
-    print("\n[3/4] Computing Python result...")
-    Y_python = bitlinear(X, W, bias=None)
-    print(f"  Y_python: {Y_python.shape}")
+    # Compute Python result without bias
+    print("\n[3/5] Computing Python result (no bias)...")
+    Y_python_no_bias = bitlinear(X, W, bias=None)
+    save_matrix('test_Y_python_no_bias.bin', Y_python_no_bias)
+    print(f"  Y_python (no bias): {Y_python_no_bias.shape}")
     
-    # Save Python output
+    # Compute Python result with bias
+    print("\n[4/5] Computing Python result (with bias)...")
+    Y_python = bitlinear(X, W, bias=bias)
     save_matrix('test_Y_python.bin', Y_python)
+    print(f"  Y_python (with bias): {Y_python.shape}")
     
     # Statistics
-    print("\n[4/4] Python output statistics:")
+    print("\n[5/5] Python output statistics:")
     print(f"  Mean:   {Y_python.mean().item():.6f}")
     print(f"  Std:    {Y_python.std().item():.6f}")
     print(f"  Min:    {Y_python.min().item():.6f}")
@@ -78,8 +97,7 @@ def main():
     
     print("\n" + "="*60)
     print("Test data saved to data/ directory")
-    print("Run validation with:")
-    print(f"  ./validate.sh kernels/bitlinear_naive.cpp")
+    print("Run validation with: ./test.sh")
     print("="*60)
 
 

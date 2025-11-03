@@ -113,12 +113,16 @@ bool test_gemm(size_t M, size_t K, size_t N, float eps) {
     // Load test data
     float* X = load_matrix("data/test_X.bin", M, K);
     float* W = load_matrix("data/test_W.bin", N, K);
+    float* bias = load_matrix("data/test_bias.bin", 1, N);
+    float* Y_python_no_bias = load_matrix("data/test_Y_python_no_bias.bin", M, N);
     float* Y_python = load_matrix("data/test_Y_python.bin", M, N);
     
-    if (!X || !W || !Y_python) {
+    if (!X || !W || !bias || !Y_python_no_bias || !Y_python) {
         std::cerr << "Failed to load test data. Run bitlinear.py first!" << std::endl;
         delete[] X;
         delete[] W;
+        delete[] bias;
+        delete[] Y_python_no_bias;
         delete[] Y_python;
         return false;
     }
@@ -127,28 +131,37 @@ bool test_gemm(size_t M, size_t K, size_t N, float eps) {
     bitkernels::PackedWeights packed_weights;
     bitkernels::prepare_weights(W, N, K, packed_weights, eps);
     
-    // Compute C++ result
+    // Test without bias
+    std::cout << "\n--- Testing without bias ---" << std::endl;
+    float* Y_cpp_no_bias = new float[M * N];
+    std::memset(Y_cpp_no_bias, 0, M * N * sizeof(float));
+    bitkernels::bitlinear_forward(X, M, K, packed_weights, Y_cpp_no_bias, nullptr, eps);
+    
+    ErrorMetrics metrics_no_bias = compare_outputs(Y_cpp_no_bias, Y_python_no_bias, M, N);
+    std::cout << "Error Metrics (no bias):" << std::endl;
+    metrics_no_bias.print();
+    bool passed_no_bias = metrics_no_bias.is_close(1e-4, 1e-3);
+    
+    // Test with bias
+    std::cout << "\n--- Testing with bias ---" << std::endl;
     float* Y_cpp = new float[M * N];
     std::memset(Y_cpp, 0, M * N * sizeof(float));
-    bitkernels::bitlinear_forward(X, M, K, packed_weights, Y_cpp, eps);
+    bitkernels::bitlinear_forward(X, M, K, packed_weights, Y_cpp, bias, eps);
     
-    // Compare
-    std::cout << "\n";
-    print_statistics(Y_python, M, N, "Python");
-    std::cout << "\n";
-    print_statistics(Y_cpp, M, N, "C++");
-    
-    std::cout << "\n" << std::string(60, '-') << std::endl;
-    std::cout << "Error Metrics:" << std::endl;
     ErrorMetrics metrics = compare_outputs(Y_cpp, Y_python, M, N);
+    std::cout << "Error Metrics (with bias):" << std::endl;
     metrics.print();
+    bool passed_with_bias = metrics.is_close(1e-4, 1e-3);
     
-    bool passed = metrics.is_close(1e-4, 1e-3);
+    bool passed = passed_no_bias && passed_with_bias;
     
     // Cleanup
     delete[] X;
     delete[] W;
+    delete[] bias;
+    delete[] Y_python_no_bias;
     delete[] Y_python;
+    delete[] Y_cpp_no_bias;
     delete[] Y_cpp;
     
     return passed;
@@ -162,46 +175,60 @@ bool test_gemv(size_t K, size_t N, float eps) {
     // Load test data (use first row of test data)
     float* X_full = load_matrix("data/test_X.bin", 128, K);
     float* W = load_matrix("data/test_W.bin", N, K);
+    float* bias = load_matrix("data/test_bias.bin", 1, N);
+    float* Y_python_no_bias_full = load_matrix("data/test_Y_python_no_bias.bin", 128, N);
     float* Y_python_full = load_matrix("data/test_Y_python.bin", 128, N);
     
-    if (!X_full || !W || !Y_python_full) {
+    if (!X_full || !W || !bias || !Y_python_no_bias_full || !Y_python_full) {
         std::cerr << "Failed to load test data." << std::endl;
         delete[] X_full;
         delete[] W;
+        delete[] bias;
+        delete[] Y_python_no_bias_full;
         delete[] Y_python_full;
         return false;
     }
     
     // Use first row only
-    float* X = X_full;  // First row
-    float* Y_python = Y_python_full;  // First row
+    float* X = X_full;
+    float* Y_python_no_bias = Y_python_no_bias_full;
+    float* Y_python = Y_python_full;
     
     // Prepare weights
     bitkernels::PackedWeights packed_weights;
     bitkernels::prepare_weights(W, N, K, packed_weights, eps);
     
-    // Compute C++ result using GEMV
+    // Test without bias
+    std::cout << "\n--- Testing without bias ---" << std::endl;
+    float* Y_cpp_no_bias = new float[N];
+    std::memset(Y_cpp_no_bias, 0, N * sizeof(float));
+    bitkernels::bitlinear_gemv(X, K, packed_weights, Y_cpp_no_bias, nullptr, eps);
+    
+    ErrorMetrics metrics_no_bias = compare_outputs(Y_cpp_no_bias, Y_python_no_bias, 1, N);
+    std::cout << "Error Metrics (no bias):" << std::endl;
+    metrics_no_bias.print();
+    bool passed_no_bias = metrics_no_bias.is_close(1e-4, 1e-3);
+    
+    // Test with bias
+    std::cout << "\n--- Testing with bias ---" << std::endl;
     float* Y_cpp = new float[N];
     std::memset(Y_cpp, 0, N * sizeof(float));
-    bitkernels::bitlinear_gemv(X, K, packed_weights, Y_cpp, eps);
+    bitkernels::bitlinear_gemv(X, K, packed_weights, Y_cpp, bias, eps);
     
-    // Compare
-    std::cout << "\n";
-    print_statistics(Y_python, 1, N, "Python");
-    std::cout << "\n";
-    print_statistics(Y_cpp, 1, N, "C++");
-    
-    std::cout << "\n" << std::string(60, '-') << std::endl;
-    std::cout << "Error Metrics:" << std::endl;
     ErrorMetrics metrics = compare_outputs(Y_cpp, Y_python, 1, N);
+    std::cout << "Error Metrics (with bias):" << std::endl;
     metrics.print();
+    bool passed_with_bias = metrics.is_close(1e-4, 1e-3);
     
-    bool passed = metrics.is_close(1e-4, 1e-3);
+    bool passed = passed_no_bias && passed_with_bias;
     
     // Cleanup
     delete[] X_full;
     delete[] W;
+    delete[] bias;
+    delete[] Y_python_no_bias_full;
     delete[] Y_python_full;
+    delete[] Y_cpp_no_bias;
     delete[] Y_cpp;
     
     return passed;
