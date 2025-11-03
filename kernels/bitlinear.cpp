@@ -475,7 +475,6 @@ static inline void compute_tile_gemm_neon(
 // ============================================================================
 // Linear Forward Pass (Tiled with optimized unpacking)
 // ============================================================================
-
 void linear(
     const float* X_fp32,
     size_t M,
