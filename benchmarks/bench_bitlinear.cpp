@@ -42,21 +42,25 @@ struct BenchResults {
 // Benchmark Functions
 // ============================================================================
 
-BenchResults benchmark_gemm(const BenchConfig& cfg) {
+BenchResults benchmark_gemm(const BenchConfig& cfg, bool use_bias) {
     std::cout << "\nBenchmarking GEMM (M=" << cfg.M << ", K=" << cfg.K 
-              << ", N=" << cfg.N << ")" << std::endl;
+              << ", N=" << cfg.N << ", bias=" << (use_bias ? "yes" : "no") << ")" << std::endl;
     std::cout << std::string(60, '-') << std::endl;
     
     // Allocate and initialize data
     float* W = new float[cfg.N * cfg.K];
     float* X = new float[cfg.M * cfg.K];
     float* Y = new float[cfg.M * cfg.N];
+    float* bias = use_bias ? new float[cfg.N] : nullptr;
     
     std::mt19937 gen(42);
     std::normal_distribution<float> dist(0.0f, 0.5f);
     
     for (size_t i = 0; i < cfg.N * cfg.K; ++i) W[i] = dist(gen);
     for (size_t i = 0; i < cfg.M * cfg.K; ++i) X[i] = dist(gen);
+    if (use_bias) {
+        for (size_t i = 0; i < cfg.N; ++i) bias[i] = dist(gen);
+    }
     
     // Prepare weights
     bitkernels::PackedWeights packed_weights;
@@ -64,13 +68,13 @@ BenchResults benchmark_gemm(const BenchConfig& cfg) {
     
     // Warmup
     for (int i = 0; i < cfg.num_warmup; ++i) {
-        bitkernels::bitlinear_gemm(X, cfg.M, cfg.K, packed_weights, Y, nullptr, cfg.eps);
+        bitkernels::bitlinear_gemm(X, cfg.M, cfg.K, packed_weights, Y, bias, cfg.eps);
     }
     
     // Benchmark
     auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < cfg.num_runs; ++i) {
-        bitkernels::bitlinear_gemm(X, cfg.M, cfg.K, packed_weights, Y, nullptr, cfg.eps);
+        bitkernels::bitlinear_gemm(X, cfg.M, cfg.K, packed_weights, Y, bias, cfg.eps);
     }
     auto end = std::chrono::high_resolution_clock::now();
     
@@ -92,24 +96,30 @@ BenchResults benchmark_gemm(const BenchConfig& cfg) {
     delete[] W;
     delete[] X;
     delete[] Y;
+    if (bias) delete[] bias;
     
     return {time_ms, gflops, bandwidth, total_bytes};
 }
 
-BenchResults benchmark_gemv(const BenchConfig& cfg) {
-    std::cout << "\nBenchmarking GEMV (K=" << cfg.K << ", N=" << cfg.N << ")" << std::endl;
+BenchResults benchmark_gemv(const BenchConfig& cfg, bool use_bias) {
+    std::cout << "\nBenchmarking GEMV (K=" << cfg.K << ", N=" << cfg.N 
+              << ", bias=" << (use_bias ? "yes" : "no") << ")" << std::endl;
     std::cout << std::string(60, '-') << std::endl;
     
     // Allocate and initialize data
     float* W = new float[cfg.N * cfg.K];
     float* X = new float[cfg.K];
     float* Y = new float[cfg.N];
+    float* bias = use_bias ? new float[cfg.N] : nullptr;
     
     std::mt19937 gen(42);
     std::normal_distribution<float> dist(0.0f, 0.5f);
     
     for (size_t i = 0; i < cfg.N * cfg.K; ++i) W[i] = dist(gen);
     for (size_t i = 0; i < cfg.K; ++i) X[i] = dist(gen);
+    if (use_bias) {
+        for (size_t i = 0; i < cfg.N; ++i) bias[i] = dist(gen);
+    }
     
     // Prepare weights
     bitkernels::PackedWeights packed_weights;
@@ -117,13 +127,13 @@ BenchResults benchmark_gemv(const BenchConfig& cfg) {
     
     // Warmup
     for (int i = 0; i < cfg.num_warmup; ++i) {
-        bitkernels::bitlinear_gemv(X, cfg.K, packed_weights, Y, nullptr, cfg.eps);
+        bitkernels::bitlinear_gemv(X, cfg.K, packed_weights, Y, bias, cfg.eps);
     }
     
     // Benchmark
     auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < cfg.num_runs; ++i) {
-        bitkernels::bitlinear_gemv(X, cfg.K, packed_weights, Y, nullptr, cfg.eps);
+        bitkernels::bitlinear_gemv(X, cfg.K, packed_weights, Y, bias, cfg.eps);
     }
     auto end = std::chrono::high_resolution_clock::now();
     
@@ -145,6 +155,7 @@ BenchResults benchmark_gemv(const BenchConfig& cfg) {
     delete[] W;
     delete[] X;
     delete[] Y;
+    if (bias) delete[] bias;
     
     return {time_ms, gflops, bandwidth, total_bytes};
 }
@@ -162,6 +173,15 @@ int main(int argc, char* argv[]) {
     size_t M = 128;
     size_t K = 4096;
     size_t N = 4096;
+    bool use_bias = false;
+    
+    // Check for --with-bias flag
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--with-bias" || arg == "-b") {
+            use_bias = true;
+        }
+    }
     
     if (argc >= 4) {
         M = std::atoi(argv[1]);
@@ -173,8 +193,8 @@ int main(int argc, char* argv[]) {
             K = ((K + 3) / 4) * 4;
             std::cout << "Adjusted K to " << K << std::endl;
         }
-    } else if (argc > 1) {
-        std::cout << "Usage: " << argv[0] << " [M] [K] [N]" << std::endl;
+    } else if (argc > 1 && !use_bias) {
+        std::cout << "Usage: " << argv[0] << " [M] [K] [N] [--with-bias]" << std::endl;
         std::cout << "Using default dimensions..." << std::endl;
     }
     
@@ -182,6 +202,7 @@ int main(int argc, char* argv[]) {
     std::cout << "  M (batch):      " << M << std::endl;
     std::cout << "  K (input):      " << K << std::endl;
     std::cout << "  N (output):     " << N << std::endl;
+    std::cout << "  Use bias:       " << (use_bias ? "yes" : "no") << std::endl;
     
     BenchConfig cfg = {M, K, N, 3, 10, 1e-6f};
     
@@ -190,11 +211,11 @@ int main(int argc, char* argv[]) {
     std::cout << "Running Benchmarks" << std::endl;
     std::cout << std::string(60, '=') << std::endl;
     
-    BenchResults gemm_results = benchmark_gemm(cfg);
+    BenchResults gemm_results = benchmark_gemm(cfg, use_bias);
     std::cout << "\nGEMM Results:" << std::endl;
     gemm_results.print();
     
-    BenchResults gemv_results = benchmark_gemv(cfg);
+    BenchResults gemv_results = benchmark_gemv(cfg, use_bias);
     std::cout << "\nGEMV Results:" << std::endl;
     gemv_results.print();
     

@@ -16,6 +16,14 @@ NC='\033[0m'
 M="${1:-128}"
 K="${2:-4096}"
 N="${3:-4096}"
+WITH_BIAS=""
+
+# Check for --with-bias flag
+for arg in "$@"; do
+    if [[ "$arg" == "--with-bias" || "$arg" == "-b" ]]; then
+        WITH_BIAS="--with-bias"
+    fi
+done
 
 echo -e "${BLUE}============================================================${NC}"
 echo -e "${GREEN}BitKernels Benchmark Runner${NC}"
@@ -25,6 +33,11 @@ echo "Configuration:"
 echo "  M (batch):  ${M}"
 echo "  K (input):  ${K}"
 echo "  N (output): ${N}"
+if [[ -n "$WITH_BIAS" ]]; then
+    echo "  Bias:       enabled"
+else
+    echo "  Bias:       disabled"
+fi
 echo ""
 
 # Build if needed
@@ -59,7 +72,7 @@ echo -e "${GREEN}Running Benchmarks${NC}"
 echo -e "${BLUE}============================================================${NC}"
 echo ""
 
-./build/bench_bitlinear ${M} ${K} ${N}
+./build/bench_bitlinear ${M} ${K} ${N} ${WITH_BIAS}
 
 echo ""
 echo -e "${GREEN}============================================================${NC}"
