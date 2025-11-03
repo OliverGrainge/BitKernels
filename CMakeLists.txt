@@ -10,6 +10,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(BUILD_TESTS "Build tests" ON)
 option(BUILD_BENCHMARKS "Build benchmarks" ON)
 option(BUILD_PYTHON "Build Python bindings" OFF)
+option(FORCE_COMMON_KERNELS "Force use of common/portable kernels instead of optimized ones" OFF)
 
 # ============================================================================
 # Compiler Detection and Flags
@@ -82,6 +83,12 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose build type" FORCE)
 endif()
 
+# Option to disable architecture-specific optimizations for testing
+if(FORCE_COMMON_KERNELS)
+    add_compile_definitions(FORCE_COMMON_KERNELS)
+    message(STATUS "FORCE_COMMON_KERNELS enabled: using common/portable kernels only")
+endif()
+
 # ============================================================================
 # Source Files
 # ============================================================================
@@ -91,6 +98,12 @@ set(COMMON_SOURCES
     src/common/types.cpp
     src/bitlinear/prepare_weights.cpp
     src/bitlinear/dispatch.cpp
+)
+
+# Common/portable kernels (always compiled as fallback)
+set(COMMON_KERNEL_SOURCES
+    src/bitlinear/common/gemm.cpp
+    src/bitlinear/common/gemv.cpp
 )
 
 # Architecture-specific sources
@@ -107,7 +120,7 @@ elseif(ARCH_X86)
     #     src/bitlinear/x86_avx/gemm.cpp
     #     src/bitlinear/x86_avx/gemv.cpp
     # )
-    message(WARNING "x86 kernels not yet implemented")
+    message(STATUS "Using common/portable kernels (x86 optimized kernels not yet implemented)")
 endif()
 
 # ============================================================================
@@ -116,6 +129,7 @@ endif()
 
 add_library(bitkernels STATIC
     ${COMMON_SOURCES}
+    ${COMMON_KERNEL_SOURCES}
     ${KERNEL_SOURCES}
 )
 
@@ -217,10 +231,13 @@ message(STATUS "  C++ Compiler:    ${CMAKE_CXX_COMPILER}")
 message(STATUS "  C++ Standard:    ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Architecture:    ${CMAKE_SYSTEM_PROCESSOR}")
 if(ARCH_ARM)
-    message(STATUS "  Backend:         ARM NEON")
+    message(STATUS "  Optimized:       ARM NEON")
 elseif(ARCH_X86)
-    message(STATUS "  Backend:         x86 (not yet implemented)")
+    message(STATUS "  Optimized:       None (using common kernels)")
+else()
+    message(STATUS "  Optimized:       None (using common kernels)")
 endif()
+message(STATUS "  Fallback:        Common/portable kernels")
 message(STATUS "  OpenMP:          ${OpenMP_CXX_FOUND}")
 message(STATUS "  Build tests:     ${BUILD_TESTS}")
 message(STATUS "  Build benchmarks:${BUILD_BENCHMARKS}")
