@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=42", "wheel", "pybind11>=2.6.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bitkernels"
+version = "0.1.0"
+description = "Optimized quantized neural network kernels"
+readme = "README.md"
+requires-python = ">=3.7"
+dependencies = [
+    "numpy>=1.19.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "torch>=1.9.0",
+]
+

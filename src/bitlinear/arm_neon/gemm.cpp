@@ -1,34 +1,20 @@
-#include "../bitlinear.h"
+#include "bitkernels/bitlinear.h"
+#include "bitkernels/types.h"
+#include "../../common/utils.h"
 #include <cmath>
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <array>
-#include <memory>
-#include <chrono>
-#include <atomic>
 #include <arm_neon.h>
+
 #ifdef USE_OPENMP
 #include <omp.h>
 #endif
 
-namespace bitlinear {
-
-// ============================================================================
-// Profiling Globals
-// ============================================================================
-
-static double total_unpack_time_ms = 0.0;
-static double total_gemm_time_ms = 0.0;
-static size_t unpack_call_count = 0;
-static size_t gemm_call_count = 0;
-
-// Thread-local accumulators to reduce contention
-thread_local double tl_unpack_time_ms = 0.0;
-thread_local double tl_gemm_time_ms = 0.0;
-thread_local size_t tl_unpack_calls = 0;
-thread_local size_t tl_gemm_calls = 0;
+namespace bitkernels {
+namespace arm_neon {
 
 // ============================================================================
 // Configuration
@@ -43,17 +29,9 @@ constexpr size_t K_TILE = 256; // Process K dimension in chunks (for very large 
 constexpr size_t CACHE_LINE = 64;
 
 // ============================================================================
-// Helpers
+// Fast LUT-based unpacking
 // ============================================================================
 
-inline uint8_t pack_ternary(int8_t t0, int8_t t1, int8_t t2, int8_t t3) {
-    auto enc = [](int8_t t) -> uint8_t {
-        return t < 0 ? 0u : (t == 0 ? 1u : 2u);
-    };
-    return enc(t0) | (enc(t1) << 2) | (enc(t2) << 4) | (enc(t3) << 6);
-}
-
-// Fast LUT-based unpacking - each LUT entry is a NEON vector with 4 unpacked values
 static auto generate_ternary_lut() {
     std::array<int8x8_t, 256> lut{};
     
@@ -141,86 +119,6 @@ static inline void unpack_weight_tile(
 }
 
 // ============================================================================
-// Weight Preparation (pure packing - no unpacked storage)
-// ============================================================================
-
-void prepare_weights(
-    const float* weights_fp32,
-    size_t N,
-    size_t K,
-    PackedTernaryWeights& packed_out,
-    float eps
-) {
-    if (K % 4 != 0) {
-        std::cerr << "ERROR: K must be divisible by 4. K=" << K << std::endl;
-        return;
-    }
-
-    const size_t total = N * K;
-
-    // 1. Compute abs-mean scale
-    double sum_abs = 0.0;
-    #ifdef USE_OPENMP
-    #pragma omp parallel for reduction(+:sum_abs)
-    #endif
-    for (size_t i = 0; i < total; ++i) {
-        sum_abs += std::abs(weights_fp32[i]);
-    }
-    float scale = static_cast<float>(sum_abs / double(total));
-    if (scale < eps) scale = eps;
-
-    // 2. Quantize to ternary
-    int8_t* ternary = new int8_t[total];
-    #ifdef USE_OPENMP
-    #pragma omp parallel for
-    #endif
-    for (size_t i = 0; i < total; ++i) {
-        float s = weights_fp32[i] / scale;
-        int r = static_cast<int>(std::lrintf(s));
-        ternary[i] = static_cast<int8_t>(std::max(-1, std::min(1, r)));
-    }
-
-    // 3. Pack into 2-bit format (4:1 compression)
-    const size_t packed_K = K / 4;
-    const size_t packed_size = N * packed_K;
-    
-    // Align to cache line for better performance
-    size_t aligned_size = ((packed_size + CACHE_LINE - 1) / CACHE_LINE) * CACHE_LINE;
-    uint8_t* packed_data = nullptr;
-    
-    // Use posix_memalign for better compatibility
-    void* ptr = nullptr;
-    if (posix_memalign(&ptr, CACHE_LINE, aligned_size) != 0) {
-        std::cerr << "ERROR: Failed to allocate aligned memory" << std::endl;
-        delete[] ternary;
-        return;
-    }
-    packed_data = static_cast<uint8_t*>(ptr);
-    std::memset(packed_data, 0, aligned_size);
-
-    #ifdef USE_OPENMP
-    #pragma omp parallel for
-    #endif
-    for (size_t n = 0; n < N; ++n) {
-        const int8_t* row = ternary + n * K;
-        uint8_t* dst = packed_data + n * packed_K;
-        for (size_t k = 0; k < K; k += 4) {
-            dst[k/4] = pack_ternary(row[k+0], row[k+1], row[k+2], row[k+3]);
-        }
-    }
-
-    // 4. Set output (packed data only - no unpacked storage)
-    packed_out.data = packed_data;
-    packed_out.scale = scale;
-    packed_out.N = N;
-    packed_out.K = K;
-    packed_out.packed_K = packed_K;
-    packed_out._internal_unpacked = nullptr;  // No unpacked storage
-
-    delete[] ternary;
-}
-
-// ============================================================================
 // Activation Quantization
 // ============================================================================
 
@@ -295,11 +193,11 @@ static inline void quantize_activations_tile(
 
 // Compute M_tile x N_tile outputs using SDOT
 static inline void compute_tile_gemm_sdot(
-    const int8_t* __restrict__ x_tile,      // M_tile x K
-    const int8_t* __restrict__ w_tile,      // N_tile x K  
+    const int8_t* __restrict__ x_tile,
+    const int8_t* __restrict__ w_tile,
     float* __restrict__ Y_fp32,
-    size_t m0,                              // Starting M index in global matrix
-    size_t n0,                              // Starting N index in global matrix
+    size_t m0,
+    size_t n0,
     size_t M_tile_actual,
     size_t N_tile_actual,
     size_t K,
@@ -307,11 +205,10 @@ static inline void compute_tile_gemm_sdot(
     const float* scales_x,
     float scale_w
 ) {
-    // Process 4 outputs at a time for each input
     for (size_t m = 0; m < M_tile_actual; ++m) {
         const int8_t* x_row = x_tile + m * K;
         const float deq_scale = scales_x[m] * scale_w;
-        float* y_row = Y_fp32 + (m0 + m) * N + n0;  // Correct global indexing
+        float* y_row = Y_fp32 + (m0 + m) * N + n0;
         
         size_t n = 0;
         
@@ -327,12 +224,10 @@ static inline void compute_tile_gemm_sdot(
             const int8_t* w2 = w_tile + (n + 2) * K;
             const int8_t* w3 = w_tile + (n + 3) * K;
             
-            // Compute dot products
             size_t k = 0;
             for (; k + 16 <= K; k += 16) {
                 int8x16_t xv = vld1q_s8(x_row + k);
                 
-                // Prefetch next iteration
                 if (k + 16 < K) {
                     __builtin_prefetch(x_row + k + 16, 0, 1);
                     __builtin_prefetch(w0 + k + 16, 0, 1);
@@ -352,7 +247,6 @@ static inline void compute_tile_gemm_sdot(
             int32_t sum2 = vaddvq_s32(acc2);
             int32_t sum3 = vaddvq_s32(acc3);
             
-            // Handle remainder
             for (; k < K; ++k) {
                 int32_t xi = x_row[k];
                 sum0 += xi * w0[k];
@@ -361,7 +255,6 @@ static inline void compute_tile_gemm_sdot(
                 sum3 += xi * w3[k];
             }
             
-            // Dequantize and store
             y_row[n + 0] = sum0 * deq_scale;
             y_row[n + 1] = sum1 * deq_scale;
             y_row[n + 2] = sum2 * deq_scale;
@@ -392,11 +285,11 @@ static inline void compute_tile_gemm_sdot(
 
 // Compute M_tile x N_tile outputs using NEON vmull
 static inline void compute_tile_gemm_neon(
-    const int8_t* __restrict__ x_tile,      // M_tile x K
-    const int8_t* __restrict__ w_tile,      // N_tile x K  
+    const int8_t* __restrict__ x_tile,
+    const int8_t* __restrict__ w_tile,
     float* __restrict__ Y_fp32,
-    size_t m0,                              // Starting M index in global matrix
-    size_t n0,                              // Starting N index in global matrix
+    size_t m0,
+    size_t n0,
     size_t M_tile_actual,
     size_t N_tile_actual,
     size_t K,
@@ -404,11 +297,10 @@ static inline void compute_tile_gemm_neon(
     const float* scales_x,
     float scale_w
 ) {
-    // Process each input row
     for (size_t m = 0; m < M_tile_actual; ++m) {
         const int8_t* x_row = x_tile + m * K;
         const float deq_scale = scales_x[m] * scale_w;
-        float* y_row = Y_fp32 + (m0 + m) * N + n0;  // Correct global indexing
+        float* y_row = Y_fp32 + (m0 + m) * N + n0;
         
         size_t n = 0;
         
@@ -426,14 +318,12 @@ static inline void compute_tile_gemm_neon(
                 int8x16_t wv0 = vld1q_s8(w0 + k);
                 int8x16_t wv1 = vld1q_s8(w1 + k);
                 
-                // Prefetch next iteration with bounds checking
                 if (k + 16 < K) {
                     __builtin_prefetch(x_row + k + 16, 0, 1);
                     __builtin_prefetch(w0 + k + 16, 0, 1);
                     __builtin_prefetch(w1 + k + 16, 0, 1);
                 }
                 
-                // Multiply and accumulate
                 int16x8_t lo0 = vmull_s8(vget_low_s8(xv), vget_low_s8(wv0));
                 int16x8_t hi0 = vmull_high_s8(xv, wv0);
                 int16x8_t lo1 = vmull_s8(vget_low_s8(xv), vget_low_s8(wv1));
@@ -448,14 +338,12 @@ static inline void compute_tile_gemm_neon(
             int32_t sum0 = vaddvq_s32(acc0);
             int32_t sum1 = vaddvq_s32(acc1);
             
-            // Handle remainder
             for (; k < K; ++k) {
                 int32_t xi = x_row[k];
                 sum0 += xi * w0[k];
                 sum1 += xi * w1[k];
             }
             
-            // Dequantize and store
             y_row[n + 0] = sum0 * deq_scale;
             y_row[n + 1] = sum1 * deq_scale;
         }
@@ -490,14 +378,14 @@ static inline void compute_tile_gemm_neon(
 #endif
 
 // ============================================================================
-// Linear Forward Pass (Tiled with optimized unpacking) - WITH PROFILING
+// GEMM Implementation
 // ============================================================================
 
-void linear(
+void bitlinear_gemm_impl(
     const float* X_fp32,
     size_t M,
     size_t K,
-    const PackedTernaryWeights& packed_weights,
+    const PackedWeights& packed_weights,
     float* Y_fp32,
     float eps
 ) {
@@ -515,17 +403,10 @@ void linear(
     // Zero output matrix
     std::memset(Y_fp32, 0, M * N * sizeof(float));
 
-    // Reset profiling counters at the start of each linear call
-    total_unpack_time_ms = 0.0;
-    total_gemm_time_ms = 0.0;
-    unpack_call_count = 0;
-    gemm_call_count = 0;
-
-    // Process in tiles to maximize weight reuse and minimize unpacking overhead
+    // Process in tiles to maximize weight reuse
     #pragma omp parallel
     {
-        // Thread-local buffers for tiles
-        // Use posix_memalign for better compatibility
+        // Thread-local buffers
         void* x_tile_ptr = nullptr;
         void* w_tile_ptr = nullptr;
         void* scales_x_ptr = nullptr;
@@ -541,19 +422,13 @@ void linear(
         int8_t* w_tile = static_cast<int8_t*>(w_tile_ptr);
         float* scales_x = static_cast<float*>(scales_x_ptr);
         
-        // Reset thread-local counters
-        tl_unpack_time_ms = 0.0;
-        tl_gemm_time_ms = 0.0;
-        tl_unpack_calls = 0;
-        tl_gemm_calls = 0;
-        
         // Process M dimension in tiles
         #pragma omp for schedule(dynamic, 1)
         for (size_t m0 = 0; m0 < M; m0 += M_TILE) {
             const size_t m_end = std::min(m0 + M_TILE, M);
             const size_t M_tile_actual = m_end - m0;
             
-            // Quantize activation tile (multiple rows at once)
+            // Quantize activation tile
             quantize_activations_tile(
                 X_fp32 + m0 * K,
                 M_tile_actual,
@@ -568,9 +443,7 @@ void linear(
                 const size_t n_end = std::min(n0 + N_TILE, N);
                 const size_t N_tile_actual = n_end - n0;
                 
-                // ===== PROFILE: Weight Unpacking =====
-                auto unpack_start = std::chrono::high_resolution_clock::now();
-                
+                // Unpack weight tile
                 unpack_weight_tile(
                     packed_data,
                     w_tile,
@@ -580,109 +453,29 @@ void linear(
                     packed_K
                 );
                 
-                auto unpack_end = std::chrono::high_resolution_clock::now();
-                double unpack_time = std::chrono::duration<double, std::milli>(unpack_end - unpack_start).count();
-                tl_unpack_time_ms += unpack_time;
-                tl_unpack_calls++;
-                
-                // ===== PROFILE: GEMM Computation =====
-                auto gemm_start = std::chrono::high_resolution_clock::now();
-                
+                // Compute tile
                 #if defined(__ARM_FEATURE_DOTPROD)
                 compute_tile_gemm_sdot(
-                    x_tile,
-                    w_tile,
-                    Y_fp32,
-                    m0,
-                    n0,
-                    M_tile_actual,
-                    N_tile_actual,
-                    K,
-                    N,
-                    scales_x,
-                    scale_w
+                    x_tile, w_tile, Y_fp32,
+                    m0, n0, M_tile_actual, N_tile_actual,
+                    K, N, scales_x, scale_w
                 );
                 #else
                 compute_tile_gemm_neon(
-                    x_tile,
-                    w_tile,
-                    Y_fp32,
-                    m0,
-                    n0,
-                    M_tile_actual,
-                    N_tile_actual,
-                    K,
-                    N,
-                    scales_x,
-                    scale_w
+                    x_tile, w_tile, Y_fp32,
+                    m0, n0, M_tile_actual, N_tile_actual,
+                    K, N, scales_x, scale_w
                 );
                 #endif
-                
-                auto gemm_end = std::chrono::high_resolution_clock::now();
-                double gemm_time = std::chrono::duration<double, std::milli>(gemm_end - gemm_start).count();
-                tl_gemm_time_ms += gemm_time;
-                tl_gemm_calls++;
             }
         }
         
-        // Accumulate thread-local results to global counters
-        #pragma omp critical
-        {
-            total_unpack_time_ms += tl_unpack_time_ms;
-            total_gemm_time_ms += tl_gemm_time_ms;
-            unpack_call_count += tl_unpack_calls;
-            gemm_call_count += tl_gemm_calls;
-        }
-        
-        // Clean up thread-local buffers
         free(x_tile);
         free(w_tile);
         free(scales_x);
     }
-    
-    // ===== PRINT PROFILING SUMMARY =====
-    double unpack_total = total_unpack_time_ms;
-    double gemm_total = total_gemm_time_ms;
-    double total = unpack_total + gemm_total;
-    size_t unpack_calls = unpack_call_count;
-    size_t gemm_calls = gemm_call_count;
-    
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "BITLINEAR KERNEL PROFILING SUMMARY" << std::endl;
-    std::cout << "========================================" << std::endl;
-    std::cout << "Matrix dimensions: M=" << M << ", N=" << N << ", K=" << K << std::endl;
-    std::cout << std::endl;
-    std::cout << "Weight Unpacking:" << std::endl;
-    std::cout << "  Total time:    " << unpack_total << " ms" << std::endl;
-    std::cout << "  # Calls:       " << unpack_calls << std::endl;
-    std::cout << "  Avg per call:  " << (unpack_calls > 0 ? unpack_total / unpack_calls : 0.0) << " ms" << std::endl;
-    std::cout << "  % of total:    " << (total > 0 ? 100.0 * unpack_total / total : 0.0) << "%" << std::endl;
-    std::cout << std::endl;
-    std::cout << "GEMM Computation:" << std::endl;
-    std::cout << "  Total time:    " << gemm_total << " ms" << std::endl;
-    std::cout << "  # Calls:       " << gemm_calls << std::endl;
-    std::cout << "  Avg per call:  " << (gemm_calls > 0 ? gemm_total / gemm_calls : 0.0) << " ms" << std::endl;
-    std::cout << "  % of total:    " << (total > 0 ? 100.0 * gemm_total / total : 0.0) << "%" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Overall:" << std::endl;
-    std::cout << "  Total time:    " << total << " ms" << std::endl;
-    std::cout << "========================================\n" << std::endl;
 }
 
-// ============================================================================
-// Cleanup function
-// ============================================================================
-
-void cleanup_weights(PackedTernaryWeights& packed_weights) {
-    if (packed_weights.data) {
-        free(packed_weights.data);
-        packed_weights.data = nullptr;
-    }
-    if (packed_weights._internal_unpacked) {
-        delete[] packed_weights._internal_unpacked;
-        packed_weights._internal_unpacked = nullptr;
-    }
-}
-
-} // namespace bitlinear
+}  // namespace arm_neon
+}  // namespace bitkernels
 
